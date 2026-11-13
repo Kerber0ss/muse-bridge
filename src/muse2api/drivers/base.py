@@ -38,6 +38,7 @@ class ChatRequest:
     turns: list[tuple[str, str]] = field(default_factory=list)
     """Role/text pairs of the request, used to continue a hot page instead of resending history."""
     cancel: asyncio.Event | None = None
+    buffer_reply: bool = False
 
 
 @dataclass

@@ -477,7 +477,8 @@ class BrowserDriver(MuseDriver):
             if not any(t.has_state for t in self._tabs.get(account.id, []) if t is not tab):
                 self._load_hot(tab, account)
             same_owner = (tab.hint or "") == (req.conversation_hint or "")
-            follow = followup_text(tab.turns, req.turns) if tab.turns and same_owner else None
+            follow = (followup_text(tab.turns, req.turns)
+                      if tab.turns and same_owner and not req.buffer_reply else None)
             if follow and len(req.images) >= tab.image_count and (
                 tab.thread_url or await self._live_continuation(tab)
             ):
@@ -535,22 +536,33 @@ class BrowserDriver(MuseDriver):
                     continue
                 got_first = True
                 if text != last:
-                    delta = text[len(emitted):] if text.startswith(emitted) else text
-                    if delta:
+                    if req.buffer_reply:
+                        # Keep the latest authoritative DOM snapshot.
+                        # Do not concatenate revised partial responses.
                         emitted = text
-                        yield delta
+                    else:
+                        delta = text[len(emitted):] if text.startswith(emitted) else text
+                        if delta:
+                            emitted = text
+                            yield delta
+
                     last, stable = text, 0
                 else:
                     stable += 1
                     if (not st.get("generating") and stable >= STABLE_POLLS_DONE) or stable >= STABLE_POLLS_FORCE:
                         finished = True
                         break
-            # The text has settled; images the reply renders (muse generates them
-            # inline when asked to draw) are collected and appended as links.
-            if finished:
-                tail = await self._collect_chat_images(tab, base, self._wants_media(req.prompt, emitted))
-                if tail:
-                    yield tail
+            # The settled DOM snapshot is authoritative for emulated tool calls.
+            # Do not concatenate intermediate snapshots: Muse may rewrite JSON
+            # while generating, which otherwise produces malformed tool_calls.
+            if finished and req.buffer_reply and emitted:
+                yield emitted
+
+            # Coding-harness chat responses deliberately skip chat-image polling.
+            # Tool schemas and normal coding prompts often contain words such as
+            # "image" or "generate", which used to trigger a spurious 25-second
+            # attachment grace period. Dedicated image/video endpoints are
+            # unaffected; chat replies no longer append generated image links.
         except CDPError as exc:
             await self._close_tab(tab)
             raise UpstreamError(f"browser error: {exc}") from exc
