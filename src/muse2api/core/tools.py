@@ -33,6 +33,17 @@ _INSTRUCTIONS = """If the request needs a tool, reply with ONLY this JSON and no
 {{"tool_calls":[{{"name":"<tool name>","arguments":{{ ... }}}}]}}
 You are only DECIDING whether a tool call should be made — do NOT perform the action, do NOT browse, do NOT invent results. The caller executes the tool and sends the result back to you as a message labeled "Tool"; use it to continue. Otherwise reply normally.
 
+IMPORTANT — EXTERNAL CODING RUNNER PROTOCOL:
+The tools listed below belong to an EXTERNAL coding runner such as DeepSeek Harness, NOT to your Muse cloud environment.
+You are ONLY selecting function calls for that external runner. You are NOT being asked to execute commands yourself.
+The external runner will execute each selected tool on the user's local computer and return its actual output to you.
+Do not inspect your own /home/hatch directory when asked about the user's local workspace.
+Do not refuse to select a listed tool merely because it is not installed in your Muse cloud environment.
+For local files, shell commands, code edits, and repository operations, select the appropriate external tool.
+Your job is ONLY to produce the JSON function-call decision, not to execute any command.
+Use the exact function names and parameter schemas provided. Never fabricate tool results.
+If a tool is needed, respond ONLY with the tool_calls JSON. The external runner will execute it after receiving your response.
+
 Tool schemas:
 {spec}{choice}"""
 
@@ -71,27 +82,56 @@ def compose_tool_prompt(turns: list[tuple[str, str]], tools: list[dict[str, Any]
     the agent already cooperates with.
     """
     instr = tool_instructions(tools, tool_choice)
+    decision_frame = (
+        "An external coding runner needs to handle the user task below. "
+        "Select the appropriate function call for that runner when a "
+        "tool is needed. Your job is ONLY to produce the JSON "
+        "function-call decision, not to execute any command. "
+        "The external runner will execute it and return its output."
+    )
     if not any(role == "tool" for role, _ in turns):
         text = "\n\n".join(t for _, t in turns)
-        return f"{text}\n\n{instr}"
-    last_user = next((t for role, t in reversed(turns) if role == "user"), "")
-    results: list[str] = []
-    decided = ""
-    for role, t in reversed(turns):
-        if role == "tool":
-            results.append(t)
+        return f"{decision_frame}\n\nUser task:\n{text}\n\n{instr}"
+    # A coding harness sends the full OpenAI message history on every tool step.
+    # Preserve it: the previous implementation kept only the LAST user message
+    # and the LAST tool-result group, so multi-step tasks stopped after `pwd`.
+    history = []
+    user_idx = 0
+    tool_idx = 0
+    for role, content in turns:
+        if not content:
+            continue
+        if role in ("system", "developer"):
+            history.append("External runner instructions and constraints:\n" + content)
+        elif role == "user":
+            user_idx += 1
+            history.append(f"User instruction {user_idx}:\n{content}")
+        elif role == "assistant":
+            history.append("Previous model response or external tool-call decision:\n" + content)
+        elif role == "tool":
+            tool_idx += 1
+            history.append(f"Verified result {tool_idx} from the external runner:\n{content}")
         else:
-            # the assistant turn that produced the calls (rendered as JSON)
-            if role == "assistant":
-                decided = t
-            break
-    parts = [last_user]
-    if decided:
-        parts.append(f"You decided on:\n{decided}")
-    parts.append("Tool result from the caller (real output of the call you decided on):\n"
-                 + "\n\n".join(reversed(results)))
-    parts.append(instr)
-    return "\n\n".join(parts) + "\n" + TOOL_CONTINUATION
+            history.append(f"Additional runner context ({role}):\n{content}")
+
+    continuation = (
+        "You are selecting actions for the EXTERNAL coding runner, not for the "
+        "Muse cloud environment. The tool results above were actually returned "
+        "by that runner. They do not mean the entire user task is complete. "
+        "Review ALL user instructions above and ALL previous tool results. "
+        "Continue any remaining steps, in order. If more external actions are "
+        "required, output ONLY the next tool_calls JSON using a listed tool "
+        "and valid arguments; do not run it yourself. Do not repeat actions "
+        "already confirmed by tool results. ONLY if every requested step is "
+        "complete, provide a final natural-language answer that covers all steps. "
+        "Never invent a tool result or claim that an unexecuted action succeeded."
+    )
+    return "\n\n".join([
+        "EXTERNAL CODING RUNNER TASK STATE (not the Muse workspace):",
+        *history,
+        instr,
+        continuation,
+    ])
 
 
 def render_tool_calls(tool_calls: list[dict[str, Any]]) -> str:

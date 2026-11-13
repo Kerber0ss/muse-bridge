@@ -50,6 +50,11 @@ async def chat_completions(body: ChatCompletionRequest, request: Request,
     # Roleplay transcript headers make the live Muse agent distrust the prompt.
     tools_active = bool(svc.settings.tool_emulation and body.tools
                         and body.tool_choice != "none")
+    roles = [m.role for m in body.messages]
+    log.info(
+        "harness request: stream=%s tools=%d tool_choice=%s messages=%d last_roles=%s",
+        body.stream, len(body.tools or []), body.tool_choice, len(roles), roles[-8:],
+    )
     prompt_text = (compose_tool_prompt(turns, body.tools, body.tool_choice)
                    if tools_active else flat.text)
 
@@ -64,6 +69,7 @@ async def chat_completions(body: ChatCompletionRequest, request: Request,
         conversation_hint=body.user,
         turns=turns,
         cancel=cancel,
+        buffer_reply=tools_active,
     )
     completion_id = "chatcmpl-" + uuid.uuid4().hex[:24]
     created = int(time.time())
@@ -82,6 +88,8 @@ async def chat_completions(body: ChatCompletionRequest, request: Request,
                 finish = "tool_calls"
             elif content is not None:
                 message["content"] = content
+        log.info("harness response: stream=false finish=%s calls=%d reply_chars=%d",
+                 finish, len(message.get("tool_calls", [])), len(text))
         return {
             "id": completion_id,
             "object": "chat.completion",
@@ -146,10 +154,12 @@ async def chat_completions(body: ChatCompletionRequest, request: Request,
                 pending = filt.finish()
                 _, calls = parse_tool_calls(produced)
                 if calls:
+                    log.info("harness response: stream=true finish=tool_calls calls=%d", len(calls))
                     for i, call in enumerate(calls):
                         yield _sse(chunk({"tool_calls": [dict(call, index=i)]}))
                     yield _sse(chunk({}, "tool_calls"))
                 else:
+                    log.info("harness response: stream=true finish=stop reply_chars=%d", len(produced))
                     if pending:
                         yield _sse(chunk({"content": pending}))
                     yield _sse(chunk({}, "stop"))

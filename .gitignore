@@ -28,3 +28,13 @@ Local State
 
 # CI workflow cannot be pushed until the token has the "workflow" scope
 .github/
+
+# Local MuseBridge development backups
+*.bak
+*.backup-*
+*.before-runner-patch
+*.tabs-backup
+
+# Local repair and verification scripts
+fix_musebridge_driver.py
+verify_driver.py
